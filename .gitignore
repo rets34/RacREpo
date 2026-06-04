@@ -5,16 +5,14 @@ obj/
 # macOS
 .DS_Store
 
-# Visual Studio / Rider
+# IDE files
 .vs/
 .idea/
 
-# User files
-*.user
-*.suo
+# Game data
+*.iso
+SCUS_971.99
+extracted_SCUS_971.99
 
-# Logs
-*.log
-
-# Decompiled output (optional)
+# Generated output
 decompiled/
