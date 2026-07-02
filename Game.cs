@@ -84,7 +84,7 @@ public class Game //generic name? for now
             }
             catch (Exception ex)
             {
-                Log($"🔥 [UPDATE ERROR] Loop calculation failure: {ex.Message}");
+                Log($"[UPDATE ERROR] Loop calculation failure: {ex.Message}");
                 time = 0;
                 break;
             }
@@ -160,7 +160,7 @@ public class Game //generic name? for now
             }
             catch (Exception ex)
             {
-                Log("🔥 PIPELINE CRASH (FULL TRACE):");
+                Log(" PIPELINE CRASH (FULL TRACE):");
                 Log(ex.ToString());
                 extractionStatus = "FAILED";
             }

@@ -175,33 +175,66 @@ public class MIPSDecompiler
             ""
         };
 
+        var allKnownFunctionTargets = new HashSet<uint>(functionBlocks.Keys);
+        var calledFunctionTargets = new HashSet<uint>();
+
+        foreach (var fn in functionBlocks.Values)
+        {
+            foreach (var block in fn)
+            {
+                foreach (var instr in block.Instructions)
+                {
+                    if (instr.Mnemonic == "jal" && instr.TargetAddress != 0)
+                        calledFunctionTargets.Add(instr.TargetAddress);
+                }
+            }
+        }
+
+        foreach (var fn in functionBlocks.OrderBy(k => k.Key))
+        {
+            lines.Add($"void func_{fn.Key:X8}(void);");
+        }
+
+        foreach (var target in calledFunctionTargets.OrderBy(a => a))
+        {
+            if (!allKnownFunctionTargets.Contains(target))
+                lines.Add($"void func_{target:X8}(void);");
+        }
+
+        lines.Add("");
+
         foreach (var fn in functionBlocks.OrderBy(k => k.Key))
         {
             lines.Add($"void func_{fn.Key:X8}(void)");
             lines.Add("{");
 
-            var labels = new HashSet<uint>();
+            var labels = new HashSet<uint> { fn.Key };
             foreach (var block in fn.Value)
             {
                 labels.Add(block.StartAddress);
                 foreach (var exit in block.Exits)
                     labels.Add(exit);
+
+                foreach (var instr in block.Instructions)
+                {
+                    if (instr.IsBranch && instr.BranchTarget != 0)
+                        labels.Add(instr.BranchTarget);
+
+                    if (instr.IsJump && instr.TargetAddress != 0)
+                        labels.Add(instr.TargetAddress);
+                }
             }
 
             foreach (var labelAddr in labels.OrderBy(a => a))
             {
-                if (labelAddr == fn.Key)
-                    continue;
-
-                lines.Add($"    L_{labelAddr:X8}:");
+                lines.Add($"    {BuildLabelName(fn.Key, labelAddr)}:");
             }
 
             foreach (var block in fn.Value.OrderBy(b => b.StartAddress))
             {
-                lines.Add($"    L_{block.StartAddress:X8}:");
                 foreach (var instr in block.Instructions)
                 {
-                    var line = TranslateInstructionToC(instr);
+                    var line = TranslateInstructionToC(instr, fn.Key);
                     if (!string.IsNullOrWhiteSpace(line))
                         lines.Add("    " + line);
                 }
@@ -219,6 +252,18 @@ public class MIPSDecompiler
             lines.Add("");
         }
 
+        foreach (var target in calledFunctionTargets.OrderBy(a => a))
+        {
+            if (!allKnownFunctionTargets.Contains(target))
+            {
+                lines.Add($"void func_{target:X8}(void)");
+                lines.Add("{");
+                lines.Add($"    /* unresolved target func_{target:X8} */");
+                lines.Add("}");
+                lines.Add("");
+            }
+        }
+
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -227,7 +272,12 @@ public class MIPSDecompiler
         return $"#include \"{moduleName}.c\"\n\nint main(void) {{\n    func_{entryPoint:X8}();\n    return 0;\n}}\n";
     }
 
-    private string TranslateInstructionToC(MIPSInstruction instr)
+    private static string BuildLabelName(uint functionAddress, uint labelAddress)
+    {
+        return $"L_{functionAddress:X8}_{labelAddress:X8}";
+    }
+
+    private string TranslateInstructionToC(MIPSInstruction instr, uint functionAddress)
     {
         if (instr.Mnemonic == "addiu" || instr.Mnemonic == "addi")
             return $"gpr[{instr.Rt}] = (u32)((s32)gpr[{instr.Rs}] + {instr.Immediate});";
@@ -254,19 +304,29 @@ public class MIPSDecompiler
             return $"store_u32(gpr[{instr.Rs}] + {instr.Immediate}, gpr[{instr.Rt}]);";
 
         if (instr.Mnemonic == "beq")
-            return $"if (gpr[{instr.Rs}] == gpr[{instr.Rt}]) goto L_{instr.BranchTarget:X8};";
+        {
+            if (instr.Rs == instr.Rt)
+                return $"goto {BuildLabelName(functionAddress, instr.BranchTarget)};";
+
+            return $"if (gpr[{instr.Rs}] == gpr[{instr.Rt}]) goto {BuildLabelName(functionAddress, instr.BranchTarget)};";
+        }
 
         if (instr.Mnemonic == "bne")
-            return $"if (gpr[{instr.Rs}] != gpr[{instr.Rt}]) goto L_{instr.BranchTarget:X8};";
+        {
+            if (instr.Rs == instr.Rt)
+                return $"/* branch never taken */";
+
+            return $"if (gpr[{instr.Rs}] != gpr[{instr.Rt}]) goto {BuildLabelName(functionAddress, instr.BranchTarget)};";
+        }
 
         if (instr.Mnemonic == "bltz")
-            return $"if ((s32)gpr[{instr.Rs}] < 0) goto L_{instr.BranchTarget:X8};";
+            return $"if ((s32)gpr[{instr.Rs}] < 0) goto {BuildLabelName(functionAddress, instr.BranchTarget)};";
 
         if (instr.Mnemonic == "bgez")
-            return $"if ((s32)gpr[{instr.Rs}] >= 0) goto L_{instr.BranchTarget:X8};";
+            return $"if ((s32)gpr[{instr.Rs}] >= 0) goto {BuildLabelName(functionAddress, instr.BranchTarget)};";
 
         if (instr.Mnemonic == "jal")
-            return $"gpr[31] = 0; goto func_{instr.TargetAddress:X8};";
+            return $"gpr[31] = 0; func_{instr.TargetAddress:X8}();";
 
         if (instr.Mnemonic == "jalr")
             return $"gpr[31] = 0; return;";
@@ -278,6 +338,11 @@ public class MIPSDecompiler
             return $"/* syscall {instr.SyscallCode} */";
 
         return $"/* {instr.Mnemonic} {instr.Operands} */";
+    }
+
+    private string BuildFunctionDeclaration(uint targetAddress)
+    {
+        return $"void func_{targetAddress:X8}(void);";
     }
 
     private void TryCompileAndRun(string moduleName, string outputDirectory)
