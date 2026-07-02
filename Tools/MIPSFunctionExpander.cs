@@ -4,108 +4,84 @@ using System.Collections.Generic;
 public class MIPSFunctionExpander
 {
     private readonly PS2RAM _ram;
-    private readonly MIPSBasicBlockBuilder _blockBuilder;
+    private readonly MIPSBasicBlockBuilder _builder;
 
     private readonly HashSet<uint> _visitedFunctions = new();
-    private readonly Queue<uint> _functionQueue = new();
+    private readonly Queue<uint> _queue = new();
 
-    // function address → blocks
     private readonly Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>> _functions = new();
 
-    public MIPSFunctionExpander(PS2RAM ram, MIPSBasicBlockBuilder blockBuilder)
+    public MIPSFunctionExpander(PS2RAM ram, MIPSBasicBlockBuilder builder)
     {
         _ram = ram;
-        _blockBuilder = blockBuilder;
+        _builder = builder;
     }
 
     // =========================================================
-    // ENTRY POINT
+    // ENTRY
     // =========================================================
     public Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>> Build(uint entryPoint)
     {
-        _functionQueue.Enqueue(entryPoint);
+        _queue.Enqueue(entryPoint);
 
-        while (_functionQueue.Count > 0)
+        while (_queue.Count > 0)
         {
-            uint funcAddr = _functionQueue.Dequeue();
+            var func = _queue.Dequeue();
 
-            if (_visitedFunctions.Contains(funcAddr))
+            if (_visitedFunctions.Contains(func))
                 continue;
 
-            _visitedFunctions.Add(funcAddr);
+            _visitedFunctions.Add(func);
 
-            var blocks = BuildFunction(funcAddr);
-            _functions[funcAddr] = blocks;
+            var blocks = _builder.Build(func);
+
+            _functions[func] = blocks;
+
+            ScanForCalls(blocks);
         }
 
         return _functions;
     }
 
     // =========================================================
-    // BUILD ONE FUNCTION
+    // CALL DISCOVERY
     // =========================================================
-    private List<MIPSBasicBlockBuilder.BasicBlock> BuildFunction(uint entryPoint)
+    private void ScanForCalls(List<MIPSBasicBlockBuilder.BasicBlock> blocks)
     {
-        var blocks = _blockBuilder.Build(entryPoint);
-
         foreach (var block in blocks)
         {
-            AnalyzeBlockForCalls(block);
-        }
-
-        return blocks;
-    }
-
-    // =========================================================
-    // SCAN BLOCK FOR FUNCTION CALLS
-    // =========================================================
-    private void AnalyzeBlockForCalls(MIPSBasicBlockBuilder.BasicBlock block)
-    {
-        for (int i = 0; i < block.Instructions.Count; i++)
-        {
-            uint raw = block.Instructions[i];
-            uint addr = block.StartAddress + (uint)(i * 4);
-
-            var instr = MIPSDisassembler.Decode(addr, raw);
-
-            // -------------------------------------------------
-            // FUNCTION CALL DETECTION (jal)
-            // -------------------------------------------------
-            if (instr.IsJump && instr.Mnemonic == "jal")
+            foreach (var instr in block.Instructions)
             {
-                uint target = instr.TargetAddress;
+                // SAFE GUARD: supports either decoded or raw model
+                var mnemonic = instr.Mnemonic;
 
-                if (!_visitedFunctions.Contains(target))
+                if (mnemonic == "jal" || mnemonic == "jalr")
                 {
-                    _functionQueue.Enqueue(target);
+                    uint target = instr.TargetAddress;
+
+                    if (target != 0 &&
+                        !_visitedFunctions.Contains(target) &&
+                        IsValid(target))
+                    {
+                        _queue.Enqueue(target);
+                    }
                 }
             }
-
-            // -------------------------------------------------
-            // INDIRECT CALLS (future hook point)
-            // -------------------------------------------------
-            if (instr.Mnemonic == "jalr")
-            {
-                // Could resolve via register tracking later
-            }
         }
     }
 
     // =========================================================
-    // DEBUG OUTPUT
+    // VALIDATION (PS2 HEURISTICS)
     // =========================================================
-    public void Dump()
+    private bool IsValid(uint addr)
     {
-        Console.WriteLine("=== FUNCTION EXPANSION GRAPH ===");
+        if (addr < 0x00100000) return false;
+        if ((addr & 3) != 0) return false;
 
-        foreach (var fn in _functions)
-        {
-            Console.WriteLine($"Function: 0x{fn.Key:X8}");
+        // PS2 ELF region heuristic
+        if (addr >= 0x02000000 && addr < 0x80000000)
+            return false;
 
-            foreach (var block in fn.Value)
-            {
-                Console.WriteLine($"  Block: 0x{block.StartAddress:X8}");
-            }
-        }
+        return true;
     }
 }

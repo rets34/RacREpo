@@ -7,7 +7,10 @@ public class ControlFlowGraphRefiner
     public class RefinedBlock
     {
         public uint StartAddress;
-        public List<uint> Instructions = new();
+
+        // CHANGED:
+        public List<MIPSInstruction> Instructions = new();
+
         public List<uint> Successors = new();
 
         public bool IsLoopHeader;
@@ -52,8 +55,13 @@ public class ControlFlowGraphRefiner
             _blocks[block.StartAddress] = new RefinedBlock
             {
                 StartAddress = block.StartAddress,
+
+                // NOW COPIES MIPSInstruction OBJECTS
                 Instructions = block.Instructions.ToList(),
-                Successors = block.Exits.Distinct().ToList()
+
+                Successors = block.Exits
+                    .Distinct()
+                    .ToList()
             };
         }
     }
@@ -67,7 +75,8 @@ public class ControlFlowGraphRefiner
         {
             foreach (var succ in block.Successors)
             {
-                if (_blocks.ContainsKey(succ) && succ <= block.StartAddress)
+                if (_blocks.ContainsKey(succ) &&
+                    succ <= block.StartAddress)
                 {
                     block.IsLoopBackEdge = true;
                     block.LoopBackTarget = succ;
@@ -88,7 +97,8 @@ public class ControlFlowGraphRefiner
 
             if (_blocks.ContainsKey(block.LoopBackTarget.Value))
             {
-                _blocks[block.LoopBackTarget.Value].IsLoopHeader = true;
+                _blocks[block.LoopBackTarget.Value]
+                    .IsLoopHeader = true;
             }
         }
     }
@@ -103,10 +113,11 @@ public class ControlFlowGraphRefiner
             if (block.Successors.Count != 2)
                 continue;
 
-            var a = block.Successors[0];
-            var b = block.Successors[1];
+            uint a = block.Successors[0];
+            uint b = block.Successors[1];
 
-            if (!_blocks.ContainsKey(a) || !_blocks.ContainsKey(b))
+            if (!_blocks.ContainsKey(a) ||
+                !_blocks.ContainsKey(b))
                 continue;
 
             block.IsIfHeader = true;
@@ -119,7 +130,7 @@ public class ControlFlowGraphRefiner
     }
 
     // =========================================================
-    // REACHABILITY EXPANSION (SAFE FIXED VERSION)
+    // REACHABILITY EXPANSION
     // =========================================================
     private void ExpandReachability()
     {
@@ -152,7 +163,11 @@ public class ControlFlowGraphRefiner
                 }
 
                 if (additions.Count > 0)
-                    block.Successors.AddRange(additions.Distinct());
+                {
+                    block.Successors.AddRange(
+                        additions.Distinct()
+                    );
+                }
             }
 
         } while (changed);

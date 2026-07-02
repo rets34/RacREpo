@@ -37,37 +37,35 @@ public class PS2IndirectCallResolver
     }
 
     private void AnalyzeBlock(MIPSBasicBlockBuilder.BasicBlock block)
+{
+    var tracker = new PS2RegisterStateTracker();
+    tracker.Reset();
+
+    foreach (var instr in block.Instructions)
     {
-        var tracker = new PS2RegisterStateTracker();
-        tracker.Reset();
+        // -------------------------------------------------
+        // Track register writes
+        // -------------------------------------------------
+        tracker.Apply(instr);
 
-        for (int i = 0; i < block.Instructions.Count; i++)
+        // -------------------------------------------------
+        // INDIRECT CALL: jalr reg
+        // -------------------------------------------------
+        if (instr.Mnemonic == "jalr" ||
+            instr.Mnemonic == "jr")
         {
-            uint addr = block.StartAddress + (uint)(i * 4);
-            uint raw = block.Instructions[i];
+            uint target = ResolveRegisterTarget(
+                instr,
+                tracker
+            );
 
-            var instr = MIPSDisassembler.Decode(addr, raw);
-
-            // -------------------------------------------------
-            // Track register writes (this is key for jalr)
-            // -------------------------------------------------
-            tracker.Apply(instr);
-
-            // -------------------------------------------------
-            // INDIRECT CALL: jalr reg
-            // -------------------------------------------------
-            if (instr.Mnemonic == "jalr" || instr.Mnemonic == "jr")
+            if (IsValidFunction(target))
             {
-                uint target = ResolveRegisterTarget(instr, tracker);
-
-                if (IsValidFunction(target))
-                {
-                    _discoveredFunctions.Add(target);
-                }
+                _discoveredFunctions.Add(target);
             }
         }
     }
-
+}
     /// <summary>
     /// Attempts to resolve what a register points to at call time
     /// </summary>

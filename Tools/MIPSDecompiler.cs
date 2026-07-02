@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 
 public class MIPSDecompiler
@@ -23,17 +25,10 @@ public class MIPSDecompiler
         {
             builder.StartBlock(block.StartAddress);
 
-            for (int i = 0; i < block.Instructions.Count; i++)
-            {
-                uint raw = block.Instructions[i];
-
-                var instr = MIPSDisassembler.Decode(
-                    block.StartAddress + (uint)(i * 4),
-                    raw
-                );
-
-                builder.EmitInstruction(instr);
-            }
+            foreach (var instr in block.Instructions)
+        {
+        builder.EmitInstruction(instr);
+        }
 
             builder.SetExits(block.Exits);
         }
@@ -106,25 +101,247 @@ public class MIPSDecompiler
         {
             builder.StartBlock(block.StartAddress);
 
-            foreach (var raw in block.Instructions)
-            {
-                var instr = MIPSDisassembler.Decode(block.StartAddress, raw);
+            foreach (var instr in block.Instructions)
+{
+    if (instr.IsSyscall)
+    {
+        var semantic = MIPSSemanticLayer.Analyze(instr.SyscallCode);
+        builder.EmitSyscall(instr.SyscallCode, semantic);
+        continue;
+    }
 
-                if (instr.IsSyscall)
-                {
-                    var semantic = MIPSSemanticLayer.Analyze(instr.SyscallCode);
-                    builder.EmitSyscall(instr.SyscallCode, semantic);
-                    continue;
-                }
-
-                builder.EmitInstruction(instr);
-            }
+    builder.EmitInstruction(instr);
+}
 
             builder.SetExits(block.Exits);
         }
 
         builder.EndFunction();
         return builder.BuildText();
+    }
+
+    public void WriteCModule(
+        string moduleName,
+        uint entryPoint,
+        Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>> functionBlocks,
+        string outputDirectory)
+    {
+        Directory.CreateDirectory(outputDirectory);
+
+        var cPath = Path.Combine(outputDirectory, moduleName + ".c");
+        var launcherPath = Path.Combine(outputDirectory, moduleName + "_launcher.c");
+
+        var cSource = GenerateCModule(moduleName, entryPoint, functionBlocks);
+        var launcherSource = GenerateCLauncher(moduleName, entryPoint);
+
+        File.WriteAllText(cPath, cSource);
+        File.WriteAllText(launcherPath, launcherSource);
+
+        TryCompileAndRun(moduleName, outputDirectory);
+    }
+
+    public string GenerateCModule(
+        string moduleName,
+        uint entryPoint,
+        Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>> functionBlocks)
+    {
+        var lines = new List<string>
+        {
+            "#include <stdint.h>",
+            "#include <stdio.h>",
+            "#include <string.h>",
+            "",
+            "typedef int32_t s32;",
+            "typedef uint32_t u32;",
+            "typedef uint8_t u8;",
+            "",
+            "#define MEM_SIZE 0x02000000",
+            "#define MEM_MASK 0x01FFFFFF",
+            "",
+            "static u32 gpr[32];",
+            "static u8 mem[MEM_SIZE];",
+            "",
+            "static u32 load_u32(u32 addr)",
+            "{",
+            "    u32 value = 0;",
+            "    memcpy(&value, mem + (addr & MEM_MASK), sizeof(value));",
+            "    return value;",
+            "}",
+            "",
+            "static void store_u32(u32 addr, u32 value)",
+            "{",
+            "    memcpy(mem + (addr & MEM_MASK), &value, sizeof(value));",
+            "}",
+            ""
+        };
+
+        foreach (var fn in functionBlocks.OrderBy(k => k.Key))
+        {
+            lines.Add($"void func_{fn.Key:X8}(void)");
+            lines.Add("{");
+
+            var labels = new HashSet<uint>();
+            foreach (var block in fn.Value)
+            {
+                labels.Add(block.StartAddress);
+                foreach (var exit in block.Exits)
+                    labels.Add(exit);
+            }
+
+            foreach (var labelAddr in labels.OrderBy(a => a))
+            {
+                if (labelAddr == fn.Key)
+                    continue;
+
+                lines.Add($"    L_{labelAddr:X8}:");
+            }
+
+            foreach (var block in fn.Value.OrderBy(b => b.StartAddress))
+            {
+                lines.Add($"    L_{block.StartAddress:X8}:");
+                foreach (var instr in block.Instructions)
+                {
+                    var line = TranslateInstructionToC(instr);
+                    if (!string.IsNullOrWhiteSpace(line))
+                        lines.Add("    " + line);
+                }
+
+                if (block.Exits.Count > 0)
+                {
+                    foreach (var exit in block.Exits.Distinct())
+                    {
+                        lines.Add($"    /* fallthrough/branch target: 0x{exit:X8} */");
+                    }
+                }
+            }
+
+            lines.Add("}");
+            lines.Add("");
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    public string GenerateCLauncher(string moduleName, uint entryPoint)
+    {
+        return $"#include \"{moduleName}.c\"\n\nint main(void) {{\n    func_{entryPoint:X8}();\n    return 0;\n}}\n";
+    }
+
+    private string TranslateInstructionToC(MIPSInstruction instr)
+    {
+        if (instr.Mnemonic == "addiu" || instr.Mnemonic == "addi")
+            return $"gpr[{instr.Rt}] = (u32)((s32)gpr[{instr.Rs}] + {instr.Immediate});";
+
+        if (instr.Mnemonic == "addu" || instr.Mnemonic == "add")
+            return $"gpr[{instr.Rd}] = gpr[{instr.Rs}] + gpr[{instr.Rt}];";
+
+        if (instr.Mnemonic == "subu" || instr.Mnemonic == "sub")
+            return $"gpr[{instr.Rd}] = gpr[{instr.Rs}] - gpr[{instr.Rt}];";
+
+        if (instr.Mnemonic == "ori")
+            return $"gpr[{instr.Rt}] = gpr[{instr.Rs}] | 0x{instr.UImmediate:X};";
+
+        if (instr.Mnemonic == "andi")
+            return $"gpr[{instr.Rt}] = gpr[{instr.Rs}] & 0x{instr.UImmediate:X};";
+
+        if (instr.Mnemonic == "lui")
+            return $"gpr[{instr.Rt}] = 0x{instr.UImmediate:X} << 16;";
+
+        if (instr.Mnemonic == "lw")
+            return $"gpr[{instr.Rt}] = load_u32(gpr[{instr.Rs}] + {instr.Immediate});";
+
+        if (instr.Mnemonic == "sw")
+            return $"store_u32(gpr[{instr.Rs}] + {instr.Immediate}, gpr[{instr.Rt}]);";
+
+        if (instr.Mnemonic == "beq")
+            return $"if (gpr[{instr.Rs}] == gpr[{instr.Rt}]) goto L_{instr.BranchTarget:X8};";
+
+        if (instr.Mnemonic == "bne")
+            return $"if (gpr[{instr.Rs}] != gpr[{instr.Rt}]) goto L_{instr.BranchTarget:X8};";
+
+        if (instr.Mnemonic == "bltz")
+            return $"if ((s32)gpr[{instr.Rs}] < 0) goto L_{instr.BranchTarget:X8};";
+
+        if (instr.Mnemonic == "bgez")
+            return $"if ((s32)gpr[{instr.Rs}] >= 0) goto L_{instr.BranchTarget:X8};";
+
+        if (instr.Mnemonic == "jal")
+            return $"gpr[31] = 0; goto func_{instr.TargetAddress:X8};";
+
+        if (instr.Mnemonic == "jalr")
+            return $"gpr[31] = 0; return;";
+
+        if (instr.Mnemonic == "jr")
+            return "return;";
+
+        if (instr.IsSyscall)
+            return $"/* syscall {instr.SyscallCode} */";
+
+        return $"/* {instr.Mnemonic} {instr.Operands} */";
+    }
+
+    private void TryCompileAndRun(string moduleName, string outputDirectory)
+    {
+        try
+        {
+            string compiler = "cc";
+            if (!File.Exists("/usr/bin/cc") && !File.Exists("/usr/local/bin/cc") && !File.Exists("/opt/homebrew/bin/cc"))
+                compiler = "clang";
+
+            var sourcePath = Path.Combine(outputDirectory, moduleName + "_launcher.c");
+            var exePath = Path.Combine(outputDirectory, moduleName);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = compiler,
+                WorkingDirectory = outputDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            psi.ArgumentList.Add(sourcePath);
+            psi.ArgumentList.Add("-std=c99");
+            psi.ArgumentList.Add("-O2");
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add(exePath);
+
+            using var compile = Process.Start(psi);
+            if (compile == null)
+                return;
+
+            var compileOutput = compile.StandardOutput.ReadToEnd() + compile.StandardError.ReadToEnd();
+            compile.WaitForExit();
+
+            if (compile.ExitCode != 0)
+            {
+                Console.WriteLine($"[C] Compile failed: {compileOutput}");
+                return;
+            }
+
+            var runPsi = new ProcessStartInfo
+            {
+                FileName = exePath,
+                WorkingDirectory = outputDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var run = Process.Start(runPsi);
+            if (run == null)
+                return;
+
+            var runOutput = run.StandardOutput.ReadToEnd() + run.StandardError.ReadToEnd();
+            run.WaitForExit();
+            Console.WriteLine($"[C] Executed: {runOutput}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[C] Launch failed: {ex.Message}");
+        }
     }
 
     // =========================================================

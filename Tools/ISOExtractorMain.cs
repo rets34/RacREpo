@@ -2,6 +2,11 @@ namespace Tools;
 
 public class ISOExtractorMain
 {
+    public static void Main(string[] args)
+    {
+        new ISOExtractorMain().Run(args);
+    }
+
     public void Run(string[] args)
     {
         if (args.Length == 0)

@@ -1,42 +1,40 @@
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using Silk.NET.Maths;
-using Silk.NET.Input;
 using System;
-using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using System.Numerics;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis;
-using System.Reflection;
 using System.Collections.Generic;
+using System.Numerics;
 
-public class Game
+public class Game //generic name? for now
 {
     private IWindow? window;
     private GL? gl;
     private RenderManager renderer = new();
 
-    private volatile bool isExtracting = false;
-    private string extractionStatus = "Drop an ISO onto the window or press E to extract";
+    private bool rendererInit = false;
+
+    private volatile bool isExtracting;
+    private string extractionStatus = "Drop ISO or press E";
     private StringBuilder extractionLog = new();
     private readonly object _logLock = new();
 
-    private string? extractionIsoPath;
-    private string? decompiledGamePath;
+    private string? isoPath;
+    private string? decompiledPath;
 
-    private volatile int functionsFound = -1;
-    private volatile int unknownInstructionCount = -1;
-    private volatile int compileErrorCount = -1;
-    private volatile int compileWarningCount = -1;
-    private volatile bool generatedStubReady = false;
+    private int functionsFound = -1;
+    private int unknownInstructionCount = -1;
+    private int compileErrorCount = -1;
+    private int compileWarningCount = -1;
+    private bool stubReady = false;
     private string executionResult = "NOT RUN";
 
-    private double accumulatedTime;
-    private const double TargetFrameTime = 1.0 / 60.0;
+    private double time;
+    private const double frame = 1.0 / 60.0;
+
+    public Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>> Functions = new();
 
     public void Run()
     {
@@ -46,67 +44,67 @@ public class Game
             ContextAPI.OpenGL,
             ContextProfile.Core,
             ContextFlags.Default,
-            new APIVersion(3, 3)
-        );
+            new APIVersion(3, 3));
 
         options.Size = new Vector2D<int>(1280, 720);
-        options.Title = "RaC Reconstruction";
+        options.Title = "RaC Decompiler";
+        
+        options.IsEventDriven = false; 
+        options.WindowState = WindowState.Normal;
 
         window = Window.Create(options);
 
-        window.Load += OnLoad;
-        window.Update += OnUpdate;
-        window.Render += OnRender;
-        window.FileDrop += OnFileDrop;
+        window.Load += Load;
+        window.Update += Update;
+        window.Render += Render;
+        window.FileDrop += Drop;
 
         window.Run();
     }
 
-    private void OnLoad()
+    private void Load()
     {
-        gl = GL.GetApi(window!);
-        renderer.Initialize(gl);
-
-        try
-        {
-            var view = Window.GetView(null);
-            var input = view.CreateInput();
-
-            var keyboard = input.Keyboards.FirstOrDefault();
-            var mouse = input.Mice.FirstOrDefault();
-
-            if (keyboard != null)
-                keyboard.KeyDown += OnKeyboardKeyDown;
-
-            if (mouse != null)
-                mouse.Click += OnMouseClick;
-        }
-        catch (Exception ex)
-        {
-            AppendLog("[UI] Input initialization failed: " + ex.Message);
-            extractionStatus = "Input initialization failed";
-        }
+        Log("[SYSTEM] Window created - waiting for GL init in Render()");
     }
 
-    private void OnUpdate(double dt)
+    // =========================================================
+    // UPDATE LOOP
+    // =========================================================
+    private void Update(double dt)
     {
-        accumulatedTime += dt;
-
-        while (accumulatedTime >= TargetFrameTime)
+        time += dt;
+        while (time >= frame)
         {
-            accumulatedTime -= TargetFrameTime;
-            RunPS2Frame();
+            time -= frame;
+
+            try
+            {
+                FUN_00226e08(); //UpdateGlobalFrameCounter
+                FUN_00208840(); //UpdateCurrentGameState
+            }
+            catch (Exception ex)
+            {
+                Log($"🔥 [UPDATE ERROR] Loop calculation failure: {ex.Message}");
+                time = 0;
+                break;
+            }
         }
     }
 
-    private void RunPS2Frame()
+    // =========================================================
+    // RENDER (SAFE GL INIT HERE)
+    // =========================================================
+    private void Render(double dt)
     {
-        FUN_00226e08();
-        FUN_00208840();
-    }
+        if (!rendererInit)
+        {
+            gl = GL.GetApi(window!);
+            renderer.Initialize(gl);
+            rendererInit = true;
 
-    private void OnRender(double dt)
-    {
+            Log("[GL] Renderer initialized safely on active context");
+        }
+
         renderer.SetExtractionStatus(extractionStatus, isExtracting);
 
         renderer.SetDecompSummary(
@@ -114,112 +112,57 @@ public class Game
             unknownInstructionCount,
             compileErrorCount,
             compileWarningCount,
-            generatedStubReady,
+            stubReady,
             executionResult
         );
 
         lock (_logLock)
-        {
             renderer.SetExtractionLog(extractionLog.ToString());
-        }
 
         renderer.Render();
     }
 
-    private void OnKeyboardKeyDown(IKeyboard keyboard, Key key, int scancode)
+    // =========================================================
+    // FILE DROP
+    // =========================================================
+    private void Drop(string[] files)
     {
-        if (key == Key.E)
-            StartExtraction();
-    }
+        if (files.Length == 0) return;
 
-    private void OnMouseClick(IMouse mouse, MouseButton button, Vector2 position)
-    {
-        if (button != MouseButton.Left) return;
+        isoPath = files[0];
+        extractionStatus = "Ready: " + Path.GetFileName(isoPath);
 
-        if (renderer.CheckButtonClick(position.X, position.Y, out string label))
-        {
-            if (label == "LAUNCH")
-                RunGeneratedStub();
-        }
-    }
+        Log("[INPUT] ISO dropped: " + isoPath);
 
-    private void OnFileDrop(string[] paths)
-    {
-        if (paths == null || paths.Length == 0) return;
-
-        extractionIsoPath = paths[0];
-        extractionStatus = $"Ready - press E to extract {Path.GetFileName(extractionIsoPath)}";
-        AppendLog("[UI] ISO selected: " + extractionIsoPath);
+        StartExtraction();
     }
 
     // =========================================================
-    // LOGGING
+    // PIPELINE
     // =========================================================
-    private void AppendLog(string msg)
-    {
-        lock (_logLock)
-        {
-            extractionLog.AppendLine($"[{DateTime.Now:HH:mm:ss}] {msg}");
-        }
-
-        Console.WriteLine(msg);
-    }
-
-    // =========================================================
-    // EXTRACTION PIPELINE
-    // =========================================================
-    private void StartExtraction(string? isoOverride = null)
+    private void StartExtraction()
     {
         if (isExtracting) return;
 
         isExtracting = true;
-        extractionStatus = "Starting extraction...";
         extractionLog.Clear();
-
-        functionsFound = -1;
-        unknownInstructionCount = -1;
-        compileErrorCount = -1;
-        compileWarningCount = -1;
-        generatedStubReady = false;
-        executionResult = "NOT RUN";
-
-        renderer.SetGameReady(false);
+        extractionStatus = "RUNNING";
 
         Task.Run(() =>
         {
             try
             {
-                var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
-                var isoPath = isoOverride ?? extractionIsoPath ?? Path.Combine(projectRoot, "RAC.iso");
+                Log("=== PIPELINE START ===");
 
-                AppendLog("[PIPE] Using ISO: " + isoPath);
+                RunPipeline(isoPath ?? "RAC.iso");
 
-                if (!File.Exists(isoPath))
-                {
-                    extractionStatus = "ISO not found";
-                    AppendLog("[ERROR] ISO not found");
-                    return;
-                }
-
-                RunFunctionExpansionPipeline(isoPath);
-
-                decompiledGamePath = Path.Combine(
-                    Path.GetDirectoryName(isoPath) ?? ".",
-                    "decompiled",
-                    "DecompiledGame.cs"
-                );
-
-                unknownInstructionCount = CountUnknownInstructions(decompiledGamePath);
-                generatedStubReady = File.Exists(decompiledGamePath);
-
-                extractionStatus = generatedStubReady
-                    ? "Partial decompilation ready"
-                    : "Decompiler output missing";
+                Log("=== PIPELINE SUCCESS ===");
             }
             catch (Exception ex)
             {
-                extractionStatus = "Extraction error";
-                AppendLog("[FATAL] " + ex);
+                Log("🔥 PIPELINE CRASH (FULL TRACE):");
+                Log(ex.ToString());
+                extractionStatus = "FAILED";
             }
             finally
             {
@@ -229,155 +172,116 @@ public class Game
     }
 
     // =========================================================
-    // FUNCTION PIPELINE (UNIFIED ORCHESTRATOR ONLY)
+    // PIPELINE CORE
     // =========================================================
-    private void RunFunctionExpansionPipeline(string isoPath)
-{
-    try
+    private void RunPipeline(string iso)
     {
-        AppendLog("=== PIPELINE START ===");
+        Log("[1] ISO Reader Init");
+        var isoReader = new ISO9660Reader(iso);
 
-        // ISO → Boot ELF
-        var iso = new ISO9660Reader(isoPath);
+        Log("[2] ISO Parse");
+        isoReader.Parse();
 
-        iso.Parse();
+        Log("[3] Extract ELF");
+        string elfPath = isoReader.ExtractBootElf();
 
-        string elfPath = iso.ExtractBootElf();
-
-        if (string.IsNullOrWhiteSpace(elfPath))
-        {
-            AppendLog("[PIPE] Failed to resolve boot ELF");
-            return;
-        }
-
-        AppendLog($"[PIPE] Boot ELF: {elfPath}");
-
-        // ELF → RAM
+        Log("[4] ELF Load");
         var elf = new ElfLoader(elfPath).Load();
 
+        Log("[5] RAM Init");
         var ram = new PS2RAM();
 
+        Log("[6] Writing segments: " + elf.Segments.Count);
+
         foreach (var seg in elf.Segments)
-            ram.Write(seg.VAddr, seg.Data);
-
-        AppendLog("[PIPE] RAM loaded");
-
-        // CFG build
-        var builder = new MIPSBasicBlockBuilder(ram);
-
-        var blocks = builder.Build(elf.EntryPoint);
-
-        AppendLog($"[PIPE] CFG blocks: {blocks.Count}");
-
-        // Unified analysis
-        var orchestrator = new DecompilationOrchestrator(ram);
-
-        var functionMap = new Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>>
         {
-            { elf.EntryPoint, blocks }
-        };
+            Log($"    SEG VAddr=0x{seg.VAddr:X8}, Size={seg.Data.Length}");
 
-        string output = orchestrator.Run(functionMap, elf.EntryPoint);
+            if (seg.Data == null || seg.Data.Length == 0)
+            {
+                Log("Empty segment skipped");
+                continue;
+            }
 
-        functionsFound = functionMap.Count;
+            // Evaluate both the start location and trailing size.
+            // PS2 Main Memory (EE RAM) maps up to exactly 32MB (0x02000000 bytes) Max.
+            ulong endAddress = (ulong)seg.VAddr + (ulong)seg.Data.Length;
 
-        AppendLog("=== PIPELINE END ===");
-    }
-    catch (Exception ex)
-    {
-        AppendLog("[PIPELINE ERROR] " + ex);
-    }
-}
+            if (seg.VAddr >= 0x02000000 || endAddress > 0x02000000)
+            {
+                Log($"Skipping out-of-bounds segment: VAddr=0x{seg.VAddr:X8}, Size={seg.Data.Length} (Ends at 0x{endAddress:X8})");
+                continue;
+            }
 
-    // =========================================================
-    // RUNTIME COMPILATION
-    // =========================================================
-    private void RunGeneratedStub()
-    {
-        if (string.IsNullOrEmpty(decompiledGamePath) || !File.Exists(decompiledGamePath))
-            return;
+            ram.Write(seg.VAddr, seg.Data);
+        }
 
-        Task.Run(() =>
+        Log("[7] Seed Discovery");
+        var seeds = FunctionSeedResolver.DiscoverSeeds(elfPath, elf.EntryPoint, ram, iso);
+        Log("[SEED] Seeds: " + seeds.Count);
+
+        Log("[8] CFG Build");
+        var cfg = new MIPSBasicBlockBuilder(ram);
+        var expanded = new Dictionary<uint, List<MIPSBasicBlockBuilder.BasicBlock>>();
+
+        foreach (var seed in seeds)
         {
             try
             {
-                string source = File.ReadAllText(decompiledGamePath);
-                var tree = CSharpSyntaxTree.ParseText(source);
-
-                var refs = ((string?)AppContext.GetData("TRUSTED_PLATFORM_TASSEMBLIES"))?
-                    .Split(Path.PathSeparator)
-                    .Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Select(p => MetadataReference.CreateFromFile(p))
-                    .ToList();
-
-                if (refs == null || refs.Count == 0)
-                {
-                    executionResult = "NO REFERENCES";
-                    AppendLog("[RUNTIME] No references found");
-                    return;
-                }
-
-                var compilation = CSharpCompilation.Create("DecompiledGameDynamic")
-                    .AddReferences(refs)
-                    .AddSyntaxTrees(tree)
-                    .WithOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-
-                using var ms = new MemoryStream();
-                var result = compilation.Emit(ms);
-
-                if (!result.Success)
-                {
-                    executionResult = "COMPILE FAILED";
-                    AppendLog("[RUNTIME] Compile failed");
-                    return;
-                }
-
-                ms.Seek(0, SeekOrigin.Begin);
-                var asm = Assembly.Load(ms.ToArray());
-
-                var type = asm.GetType("DecompiledGame");
-                var method = type?.GetMethod("Execute");
-
-                method?.Invoke(null, null);
-
-                executionResult = "RUN COMPLETE";
-                AppendLog("[RUNTIME] Execution complete");
+                var blocks = cfg.Build(seed, 200);
+                if (blocks != null && blocks.Count > 0)
+                    expanded[seed] = blocks;
             }
             catch (Exception ex)
             {
-                executionResult = "RUNTIME ERROR";
-                AppendLog("[RUNTIME ERROR] " + ex);
+                Log($"[SEED] Failed for 0x{seed:X8}: {ex.Message}");
             }
-        });
-    }
+        }
 
-    private static int CountUnknownInstructions(string path)
-    {
-        if (!File.Exists(path)) return -1;
-        return File.ReadLines(path).Count(l => l.Contains(": unknown "));
+        Log("[9] Function Expansion");
+        var expander = new MIPSFunctionExpander(ram, cfg);
+        var expandedFromCalls = expander.Build(elf.EntryPoint);
+
+        foreach (var kvp in expandedFromCalls)
+        {
+            if (!expanded.ContainsKey(kvp.Key))
+                expanded[kvp.Key] = kvp.Value;
+        }
+
+        Log("[PIPE] Function map size: " + expanded.Count);
+        Functions = expanded;
+        functionsFound = Functions.Count;
+
+        var decompiler = new MIPSDecompiler(ram);
+        var exportDir = Path.Combine(AppContext.BaseDirectory, "decompiled");
+        decompiler.WriteCModule("DecompiledGame", elf.EntryPoint, Functions, exportDir);
+        Log("[C] Wrote C output to: " + exportDir);
+
+        Log("[PIPE] Functions: " + functionsFound);
+
+        renderer.SetGameReady(true);
+        executionResult = "C EXPORT READY";
+
+        Log("=== PIPELINE END ===");
     }
 
     // =========================================================
-    // PS2 STATE
+    // LOGGING
+    // =========================================================
+    private void Log(string msg)
+    {
+        lock (_logLock)
+            extractionLog.AppendLine(msg);
+
+        Console.WriteLine(msg);
+    }
+
+    // =========================================================
+    // SIM HOOKS
     // =========================================================
     private int DAT_0015ee24;
     private int DAT_0015f5ec;
     private int DAT_0015ed80 = 1;
-
-    private void FUN_00226e08()
-    {
-        int iVar1 = DAT_0015ee24;
-
-        if (DAT_0015f5ec == 0)
-        {
-            iVar1++;
-
-            if (iVar1 % 0x32 == 0 && DAT_0015ed80 != 0)
-                iVar1 += 0xB;
-        }
-
-        DAT_0015ee24 = iVar1;
-    }
-
-    private void FUN_00208840() { }
+    private void FUN_00226e08() => DAT_0015ee24++; //UpdateGlobalFrameCounter
+    private void FUN_00208840() { } //UpdateCurrentGameState
 }

@@ -189,16 +189,188 @@ public static class MIPSDisassembler
         result.Operands = $"0x{result.TargetAddress:X8}";
     }
 
-    private static void DecodeRegImm(uint address, uint instruction, MIPSInstruction result)
-    {
-        // unchanged stub
-    }
+private static void DecodeRegImm(
+    uint address,
+    uint instruction,
+    MIPSInstruction result)
+{
+    result.Type = MIPSInstructionType.IType;
 
-    private static void DecodeIType(uint address, uint instruction, uint opcode, MIPSInstruction result)
-    {
-        // unchanged stub
-    }
+    result.Rs = (instruction >> 21) & 0x1F;
+    uint rt = (instruction >> 16) & 0x1F;
 
+    result.Immediate = (short)(instruction & 0xFFFF);
+
+    uint target =
+        (uint)(address + 4 + (result.Immediate << 2));
+
+    switch (rt)
+    {
+        case 0x00:
+            result.IsBranch = true;
+            result.BranchTarget = target;
+            result.Mnemonic = "bltz";
+            result.Operands =
+                $"{Reg(result.Rs)}, 0x{target:X8}";
+            break;
+
+        case 0x01:
+            result.IsBranch = true;
+            result.BranchTarget = target;
+            result.Mnemonic = "bgez";
+            result.Operands =
+                $"{Reg(result.Rs)}, 0x{target:X8}";
+            break;
+
+        default:
+            result.Mnemonic = "regimm";
+            result.Operands = $"0x{instruction:X8}";
+            break;
+    }
+}
+
+    private static void DecodeIType(
+    uint address,
+    uint instruction,
+    uint opcode,
+    MIPSInstruction result)
+{
+    result.Type = MIPSInstructionType.IType;
+
+    result.Rs = (instruction >> 21) & 0x1F;
+    result.Rt = (instruction >> 16) & 0x1F;
+
+    result.Immediate = (short)(instruction & 0xFFFF);
+    result.UImmediate = (ushort)(instruction & 0xFFFF);
+
+    switch (opcode)
+    {
+        case 0x04: // beq
+        {
+            result.IsBranch = true;
+
+            result.BranchTarget =
+                (uint)(address + 4 + (result.Immediate << 2));
+
+            result.Mnemonic = "beq";
+
+            result.Operands =
+                $"{Reg(result.Rs)}, {Reg(result.Rt)}, 0x{result.BranchTarget:X8}";
+            break;
+        }
+
+        case 0x05: // bne
+        {
+            result.IsBranch = true;
+
+            result.BranchTarget =
+                (uint)(address + 4 + (result.Immediate << 2));
+
+            result.Mnemonic = "bne";
+
+            result.Operands =
+                $"{Reg(result.Rs)}, {Reg(result.Rt)}, 0x{result.BranchTarget:X8}";
+            break;
+        }
+
+        case 0x08:
+            result.Mnemonic = "addi";
+            result.Operands =
+                $"{Reg(result.Rt)}, {Reg(result.Rs)}, {result.Immediate}";
+            break;
+
+        case 0x09:
+            result.Mnemonic = "addiu";
+            result.Operands =
+                $"{Reg(result.Rt)}, {Reg(result.Rs)}, {result.Immediate}";
+            break;
+
+        case 0x0C:
+            result.Mnemonic = "andi";
+            result.Operands =
+                $"{Reg(result.Rt)}, {Reg(result.Rs)}, 0x{result.UImmediate:X}";
+            break;
+
+        case 0x0D:
+            result.Mnemonic = "ori";
+            result.Operands =
+                $"{Reg(result.Rt)}, {Reg(result.Rs)}, 0x{result.UImmediate:X}";
+            break;
+
+        case 0x0E:
+            result.Mnemonic = "xori";
+            result.Operands =
+                $"{Reg(result.Rt)}, {Reg(result.Rs)}, 0x{result.UImmediate:X}";
+            break;
+
+        case 0x0F:
+            result.Mnemonic = "lui";
+            result.Operands =
+                $"{Reg(result.Rt)}, 0x{result.UImmediate:X}";
+            break;
+
+        case 0x20:
+            result.IsLoad = true;
+            result.Mnemonic = "lb";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x21:
+            result.IsLoad = true;
+            result.Mnemonic = "lh";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x23:
+            result.IsLoad = true;
+            result.Mnemonic = "lw";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x24:
+            result.IsLoad = true;
+            result.Mnemonic = "lbu";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x25:
+            result.IsLoad = true;
+            result.Mnemonic = "lhu";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x28:
+            result.IsStore = true;
+            result.Mnemonic = "sb";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x29:
+            result.IsStore = true;
+            result.Mnemonic = "sh";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        case 0x2B:
+            result.IsStore = true;
+            result.Mnemonic = "sw";
+            result.Operands =
+                $"{Reg(result.Rt)}, {result.Immediate}({Reg(result.Rs)})";
+            break;
+
+        default:
+            result.Mnemonic = "unknown";
+            result.Operands = $"0x{instruction:X8}";
+            break;
+    }
+}
     private static string Reg(uint r)
     {
         return r switch

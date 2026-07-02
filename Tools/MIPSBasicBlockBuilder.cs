@@ -24,10 +24,12 @@ public class MIPSBasicBlockBuilder
         while (workQueue.Count > 0)
         {
             uint pc = workQueue.Dequeue();
+
             if (visited.Contains(pc))
                 continue;
 
             var block = new BasicBlock(pc);
+
             blockMap[pc] = block;
             blocks.Add(block);
 
@@ -40,47 +42,101 @@ public class MIPSBasicBlockBuilder
 
                 visited.Add(currentPc);
 
-                uint instr = _ram.Read32(currentPc);
+                uint raw = _ram.Read32(currentPc);
+
+                MIPSInstruction instr =
+                    MIPSDisassembler.Decode(currentPc, raw);
+
                 block.Instructions.Add(instr);
 
-                if (IsBranch(instr))
+                // =========================
+                // BRANCH
+                // =========================
+                if (instr.IsBranch)
                 {
-                    uint target = GetBranchTarget(currentPc, instr);
+                    uint target = instr.BranchTarget;
                     uint fallthrough = currentPc + 8;
-                    block.Instructions.Add(_ram.Read32(currentPc + 4));
+
+                    uint delayRaw = _ram.Read32(currentPc + 4);
+
+                    block.Instructions.Add(
+                        MIPSDisassembler.Decode(
+                            currentPc + 4,
+                            delayRaw
+                        )
+                    );
 
                     block.Exits.Add(target);
                     block.Exits.Add(fallthrough);
 
-                    Console.WriteLine($"[CFG] Branch at 0x{currentPc:X8} → 0x{target:X8} / 0x{fallthrough:X8}");
+                    Console.WriteLine(
+                        $"[CFG] Branch at 0x{currentPc:X8} → 0x{target:X8} / 0x{fallthrough:X8}"
+                    );
 
-                    if (!visited.Contains(target) && !blockMap.ContainsKey(target))
+                    if (!visited.Contains(target) &&
+                        !blockMap.ContainsKey(target))
+                    {
                         workQueue.Enqueue(target);
+                    }
 
-                    if (!visited.Contains(fallthrough) && !blockMap.ContainsKey(fallthrough))
+                    if (!visited.Contains(fallthrough) &&
+                        !blockMap.ContainsKey(fallthrough))
+                    {
                         workQueue.Enqueue(fallthrough);
+                    }
 
                     break;
                 }
 
-                if (IsJump(instr))
+                // =========================
+                // JUMP / CALL
+                // =========================
+                if (instr.IsJump)
                 {
-                    uint target = GetJumpTarget(currentPc, instr);
-                    block.Instructions.Add(_ram.Read32(currentPc + 4));
+                    uint target = instr.TargetAddress;
+
+                    uint delayRaw = _ram.Read32(currentPc + 4);
+
+                    block.Instructions.Add(
+                        MIPSDisassembler.Decode(
+                            currentPc + 4,
+                            delayRaw
+                        )
+                    );
+
                     block.Exits.Add(target);
 
-                    Console.WriteLine($"[CFG] Jump at 0x{currentPc:X8} → 0x{target:X8}");
+                    Console.WriteLine(
+                        $"[CFG] Jump at 0x{currentPc:X8} → 0x{target:X8}"
+                    );
 
-                    if (!visited.Contains(target) && !blockMap.ContainsKey(target))
+                    if (!visited.Contains(target) &&
+                        !blockMap.ContainsKey(target))
+                    {
                         workQueue.Enqueue(target);
+                    }
 
                     break;
                 }
 
-                if (IsReturn(instr))
+                // =========================
+                // RETURN
+                // =========================
+                if (instr.IsReturn)
                 {
-                    block.Instructions.Add(_ram.Read32(currentPc + 4));
-                    Console.WriteLine($"[CFG] Return at 0x{currentPc:X8}");
+                    uint delayRaw = _ram.Read32(currentPc + 4);
+
+                    block.Instructions.Add(
+                        MIPSDisassembler.Decode(
+                            currentPc + 4,
+                            delayRaw
+                        )
+                    );
+
+                    Console.WriteLine(
+                        $"[CFG] Return at 0x{currentPc:X8}"
+                    );
+
                     break;
                 }
 
@@ -99,44 +155,14 @@ public class MIPSBasicBlockBuilder
     public class BasicBlock
     {
         public uint StartAddress;
-        public List<uint> Instructions = new();
+
+        public List<MIPSInstruction> Instructions = new();
+
         public List<uint> Exits = new();
 
         public BasicBlock(uint start)
         {
             StartAddress = start;
         }
-    }
-
-    // =========================
-    // INSTRUCTION HELPERS
-    // =========================
-    private bool IsBranch(uint instr)
-    {
-        uint op = instr >> 26;
-        return op == 0x04 || op == 0x05; // beq, bne
-    }
-
-    private bool IsJump(uint instr)
-    {
-        uint op = instr >> 26;
-        return op == 0x02 || op == 0x03; // j, jal
-    }
-
-    private bool IsReturn(uint instr)
-    {
-        return (instr & 0x3F) == 0x08; // jr
-    }
-
-    private uint GetBranchTarget(uint pc, uint instr)
-    {
-        short imm = (short)(instr & 0xFFFF);
-        return (uint)(pc + 4 + (imm << 2));
-    }
-
-    private uint GetJumpTarget(uint pc, uint instr)
-    {
-        uint target = instr & 0x03FFFFFF;
-        return (pc & 0xF0000000) | (target << 2);
     }
 }

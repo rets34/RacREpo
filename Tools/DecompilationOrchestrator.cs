@@ -102,7 +102,7 @@ Console.WriteLine($"[5] Built function CFGs: {expandedBlocks.Count}");
         );
 
         Console.WriteLine("======================================");
-        Console.WriteLine("✅ PIPELINE COMPLETE");
+        Console.WriteLine("PIPELINE COMPLETE");
         Console.WriteLine($"Final functions: {expandedBlocks.Count}");
         Console.WriteLine("======================================");
 
